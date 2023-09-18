@@ -27,9 +27,13 @@
 #ifndef __I2C_SLAVE_H
 #define __I2C_SLAVE_H
 
+#include "ch32v003fun.h"
 #include <stdint.h>
+#include <stdio.h>
 
 #define APB_CLOCK FUNCONF_SYSTEM_CORE_CLOCK
+
+typedef void (*i2c_callback_t)(void);
 
 struct _i2c_slave_state {
     uint8_t first_write;
@@ -37,14 +41,16 @@ struct _i2c_slave_state {
     uint8_t position;
     volatile uint8_t* volatile registers;
     uint8_t size;
+    i2c_callback_t callback;
 } i2c_slave_state;
 
-void SetupI2CSlave(uint8_t address, volatile uint8_t* registers, uint8_t size) {
+void SetupI2CSlave(uint8_t address1, uint8_t address2, volatile uint8_t* registers, uint8_t size, i2c_callback_t callback) {
     i2c_slave_state.first_write = 1;
     i2c_slave_state.offset = 0;
     i2c_slave_state.position = 0;
     i2c_slave_state.registers = registers;
     i2c_slave_state.size = size;
+    i2c_slave_state.callback = callback;
 
     // Enable GPIOC and I2C
     RCC->APB2PCENR |= RCC_APB2Periph_GPIOC;
@@ -70,13 +76,12 @@ void SetupI2CSlave(uint8_t address, volatile uint8_t* registers, uint8_t size) {
     I2C1->CTLR2 |= (APB_CLOCK/prerate) & I2C_CTLR2_FREQ;
 
     // Enable interrupts
-    I2C1->CTLR2 |= I2C_CTLR2_ITBUFEN;
-    I2C1->CTLR2 |= I2C_CTLR2_ITEVTEN; // Event interrupt
-    I2C1->CTLR2 |= I2C_CTLR2_ITERREN; // Error interrupt
+    I2C1->CTLR2 |= I2C_CTLR2_ITBUFEN | I2C_CTLR2_ITEVTEN | I2C_CTLR2_ITERREN;
 
     NVIC_EnableIRQ(I2C1_EV_IRQn); // Event interrupt
     NVIC_SetPriority(I2C1_EV_IRQn, 2 << 4);
     NVIC_EnableIRQ(I2C1_ER_IRQn); // Error interrupt
+    NVIC_SetPriority(I2C1_ER_IRQn, 2 << 4);
 
     // Set clock configuration
     uint32_t clockrate = 1000000; // I2C Bus clock rate, must be lower than the logic clock rate
@@ -85,12 +90,16 @@ void SetupI2CSlave(uint8_t address, volatile uint8_t* registers, uint8_t size) {
     //I2C1->CKCFGR = (APB_CLOCK/(2*clockrate))&I2C_CKCFGR_CCR; // Standard mode good to 100kHz
 
     // Set I2C address
-    I2C1->OADDR1 = address << 1;
+    I2C1->OADDR1 = address1 << 1;
+
+    if (address2 > 0) {
+        I2C1->OADDR2 = (address2 << 1) | 1;
+    }
 
     // Enable I2C
     I2C1->CTLR1 |= I2C_CTLR1_PE;
 
-    // Acknowledge the first address match event when it happens
+    // Acknowledge bytes when they are received
     I2C1->CTLR1 |= I2C_CTLR1_ACK;
 }
 
@@ -99,8 +108,6 @@ void I2C1_EV_IRQHandler(void) {
     uint16_t STAR1, STAR2 __attribute__((unused));
     STAR1 = I2C1->STAR1;
     STAR2 = I2C1->STAR2;
-
-    I2C1->CTLR1 |= I2C_CTLR1_ACK;
 
     if (STAR1 & I2C_STAR1_ADDR) { // Start event
         i2c_slave_state.first_write = 1; // Next write will be the offset
@@ -126,6 +133,13 @@ void I2C1_EV_IRQHandler(void) {
             i2c_slave_state.position++;
         } else {
             I2C1->DATAR = 0x00;
+        }
+    }
+
+    if (STAR1 & I2C_STAR1_STOPF) { // Stop event
+        I2C1->CTLR1 &= ~(I2C_CTLR1_STOP); // Clear stop
+        if (i2c_slave_state.callback != NULL) {
+            i2c_slave_state.callback();
         }
     }
 }

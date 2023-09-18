@@ -1,25 +1,34 @@
-#define SYSTEM_CORE_CLOCK 48000000
-
 #include "ch32v003fun.h"
 #include "i2c_slave.h"
 #include <stdio.h>
 #include <string.h>
+#include <stdbool.h>
 
-#define VFD_DCRAM_WR    0x10		// ccccaaaa dddddddd dddddddd ..
-#define VFD_CGRAM_WR    0x20		// "
-#define VFD_ADRAM_WR    0x30		// ccccaaaa ******dd ******dd ..
-#define VFD_DUTY        0x50		// ccccdddd
-#define VFD_NUMDIGIT    0x60		// "
-#define VFD_LIGHTS      0x70		// cccc**dd
+// Board revision
+#define HW_REV 2
 
-#define LINORM          0x00		// normal display
-#define LIOFF           0x01		// lights OFF
-#define LION            0x02		//        ON
+// VFD registers
+#define VFD_DCRAM_WR    0x10  // ccccaaaa dddddddd dddddddd ..
+#define VFD_CGRAM_WR    0x20  // "
+#define VFD_ADRAM_WR    0x30  // ccccaaaa ******dd ******dd ..
+#define VFD_DUTY        0x50  // ccccdddd
+#define VFD_NUMDIGIT    0x60  // "
+#define VFD_LIGHTS      0x70  // cccc**dd
 
-#define NUMDIGITS       12			// display digit width
-#define BUFSIZE         100			// display/scroll buffer
+// VFD register values
+#define VFD_LIGHTS_NORMAL 0x00 // Normal operation
+#define VFD_LIGHTS_OFF    0x01 // Turn off all segments
+#define VFD_LIGHTS_ON     0x02 // Turn on all segments
 
-volatile uint8_t i2c_registers[32] = {0};
+#define VFD_DIGITS 12
+
+#define DATA_OFFSET 10
+#define DATA_LENGTH (sizeof(i2c_registers) - DATA_OFFSET)
+
+uint8_t i2c_registers[255] = {0};
+
+uint8_t curr_i2c_registers[sizeof(i2c_registers)] = {0};
+uint8_t prev_i2c_registers[sizeof(i2c_registers)] = {0};
 
 void enable_timer() {
     // Enable GPIO port A and timer 1
@@ -118,7 +127,6 @@ uint8_t reverse(uint8_t b) {
 }
 
 void spi_send(const uint8_t* data, uint16_t length) {
-    //printf("SPI sending %u bytes %02x\n", length, data[0]);
     GPIOC->BSHR |= 1 << (0 + 16); // Pull CS low
     Delay_Us(8);
     for (uint16_t position = 0; position < length; position++) {
@@ -136,20 +144,18 @@ void spi_send_command(const uint8_t command) {
     spi_send(&command, 1);
 }
 
-void display_enable() {
+void display_enable(bool test) {
     GPIOC->BSHR  |= 1 << (4 + 16); // Disable controller (pull RESET low)
     GPIOC->BSHR  |= 1 << 3; // Enable 5V
     GPIOD->BSHR  |= 1 << 0; // Enable 24V
     enable_timer();
-    //test_dc();
     Delay_Ms(10);
     GPIOC->BSHR  |= 1 << 4; // Enable controller (pull RESET high)
     Delay_Ms(10);
-    spi_send_command(VFD_NUMDIGIT | 12);
+    spi_send_command(VFD_NUMDIGIT | VFD_DIGITS);
     spi_send_command(VFD_DUTY | 4);
-    spi_send_command(VFD_LIGHTS | LINORM);
+    spi_send_command(VFD_LIGHTS | (test ? VFD_LIGHTS_ON : VFD_LIGHTS_NORMAL));
     Delay_Ms(1);
-    //printf("Display enabled\n");
 }
 
 void display_disable() {
@@ -157,40 +163,56 @@ void display_disable() {
     GPIOD->BSHR  |= 1 << (0 + 16); // Disable 24V
     GPIOC->BSHR  |= 1 << (3 + 16); // Disable 5V
     disable_timer();
-
-    //printf("Display disabled\n");
 }
 
 uint8_t convert_char(char c) {
-    if(c>='@' && c<='_')				// 64.. -> 16..
+    if (c>='@' && c<='_') {
+        // 64.. -> 16..
         c -= 48;
-    else if(c>=' ' && c<='?')			// 32.. -> 48..
+    } else if(c>=' ' && c<='?') {
+        // 32.. -> 48..
         c += 16;
-    else if(c>='a' && c<='z')			// 97.. -> 17..
+    } else if(c>='a' && c<='z') {
+        // 97.. -> 17..
         c -= 80;
-    else								// unvalid -> ?
+    } else { // Other characters (?)
         c = 79;
+    }
     return c;
 }
 
-void display_update(volatile uint8_t* data) {
+void display_update(char* data) {
     uint8_t buffer[13];
     buffer[0] = VFD_DCRAM_WR;
-    for (uint8_t i = 0; i < 12; i++) {
+    for (uint8_t i = 0; i < VFD_DIGITS; i++) {
         buffer[i + 1] = convert_char(data[11-i]);
     }
     spi_send(buffer, sizeof(buffer));
+    char str_buffer[VFD_DIGITS + 1] = {0};
+    memcpy(str_buffer, data, VFD_DIGITS);
+}
+
+uint8_t read_i2c_address() {
+#if HW_REV > 1
+    return 0x10 + ((~(GPIOD->INDR >> 2)) & 0x1F);
+#else
+    return 0x10;
+#endif
+}
+
+bool i2c_changed = false;
+void i2c_callback() {
+    i2c_changed = true;
 }
 
 int main() __attribute__((optimize("O0")));
 int main() {
     SystemInit();
-    SetupI2CSlave(0xA, i2c_registers, sizeof(i2c_registers));
 
-    // Enable GPIO ports C and D
-    RCC->APB2PCENR |= RCC_APB2Periph_GPIOC | RCC_APB2Periph_GPIOD;
+    // Enable GPIO ports A, C and D
+    RCC->APB2PCENR |= RCC_APB2Periph_GPIOA | RCC_APB2Periph_GPIOC | RCC_APB2Periph_GPIOD;
 
-    // Configure GPIO C3 as output (5V_ENABLE)
+    // Configure GPIO C3 as output (5V_/*ENABLE*/)
     GPIOC->CFGLR &= ~(0xf<<(4*3));
     GPIOC->CFGLR |= (GPIO_Speed_10MHz | GPIO_CNF_OUT_PP)<<(4*3);
 
@@ -202,24 +224,113 @@ int main() {
     GPIOD->CFGLR &= ~(0xf<<(4*0));
     GPIOD->CFGLR |= (GPIO_Speed_10MHz | GPIO_CNF_OUT_PP)<<(4*0);
 
+    // Configure GPIO D7 as output (LED)
+    GPIOD->CFGLR &= ~(0xf<<(4*7));
+    GPIOD->CFGLR |= (GPIO_Speed_10MHz | GPIO_CNF_OUT_PP)<<(4*7);
+
+    // Configure GPIO D2, D3, D4, D5 and D6 as inputs with pullup (I2C_ADDR)
+    for (uint8_t i = 2; i <= 6; i++) {
+        GPIOD->CFGLR &= ~(0xf<<(4*i));
+        GPIOD->CFGLR |= (GPIO_Speed_In | GPIO_CNF_IN_PUPD)<<(4*i);
+        GPIOD->OUTDR |= 1 << i; // Pull-up
+    }
+
+    SetupI2CSlave(read_i2c_address(), 0, i2c_registers, sizeof(i2c_registers), i2c_callback);
+
     spi_initialize();
     display_disable();
 
-    uint8_t curr_display_state = 0;
+    i2c_registers[25] = 1; // Turn on LED at startup
+
+    uint8_t scroll_mode = 0;
+    uint32_t scroll_interval = 1000 * DELAY_MS_TIME;
+    uint32_t previousCounter = 0;
+    uint8_t scroll_position = 0;
+    uint8_t scroll_length = 0;
+    bool force_update = false;
+
+    strcpy(&i2c_registers[DATA_OFFSET], "           1");
+    i2c_registers[0] = 5; // Enable screen and LED
+    i2c_changed = true;
+
 
     while (1) {
-        if (i2c_registers[0] != curr_display_state) {
-            if (i2c_registers[0] == 0) {
+        if (i2c_changed) {
+            memcpy(curr_i2c_registers, i2c_registers, sizeof(i2c_registers));
+            i2c_changed = false;
+        }
+
+        // Register 0, bit 0: display power control
+        // Register 0, bit 1: display test mode
+        uint8_t display = (curr_i2c_registers[0] >> 0) & 3;
+        uint8_t prev_display = (prev_i2c_registers[0] >> 0) & 3;
+        if (display != prev_display) {
+            if (display & 1) {
+                display_enable((display >> 1) & 1);
+            } else {
                 display_disable();
-            } else if (curr_display_state == 0) {
-                    display_enable();
             }
-            if (i2c_registers[0] == 1) {
-                display_update(&i2c_registers[1]);
-            } else if (i2c_registers[0] == 2) {
-                display_update(&i2c_registers[13]);
+            force_update = true;
+        }
+
+        // Register 0, bit 2: LED control
+        bool led = (curr_i2c_registers[0] >> 2) & 1;
+        GPIOD->BSHR  |= 1 << (7 + (led ? 0 : 16));
+
+        // Register 1: displayed offset / start
+        uint8_t offset = curr_i2c_registers[1];
+        if (offset > DATA_LENGTH - VFD_DIGITS) offset = DATA_LENGTH - VFD_DIGITS;
+        uint8_t prev_offset = prev_i2c_registers[1];
+        if (prev_offset > DATA_LENGTH - VFD_DIGITS) prev_offset = DATA_LENGTH - VFD_DIGITS;
+
+        // Register 2: scroll length
+        scroll_length = curr_i2c_registers[2];
+        if (scroll_length > DATA_LENGTH - VFD_DIGITS) scroll_length = DATA_LENGTH - VFD_DIGITS;
+
+        // Register 3: mode (bits 0-3: scroll mode)
+        scroll_mode = curr_i2c_registers[3];
+
+        // Registers 4-5: scroll speed
+        uint16_t* scroll_interval_ptr = (uint16_t*) &curr_i2c_registers[4];
+        scroll_interval = (*scroll_interval_ptr) * DELAY_MS_TIME;
+
+        // Registers 6-9: reserved
+
+        // Registers 10 - 255: data
+        bool data_changed = (memcmp(&prev_i2c_registers[DATA_OFFSET], &curr_i2c_registers[DATA_OFFSET], DATA_LENGTH) != 0);
+
+        // Update screen if offset or data changes
+        if (offset != prev_offset || data_changed || force_update) {
+            display_update((char*) &curr_i2c_registers[DATA_OFFSET + offset + scroll_position]);
+            force_update = false;
+        }
+
+        memcpy(prev_i2c_registers, curr_i2c_registers, sizeof(i2c_registers));
+
+        uint32_t currentCounter = SysTick->CNT;
+        if (currentCounter - previousCounter >= scroll_interval && scroll_interval > 0 && scroll_length > 0) {
+            previousCounter = currentCounter;
+            if ((scroll_mode & 0x0F) == 1) {
+                scroll_position++;
+                if (scroll_position > DATA_LENGTH - VFD_DIGITS) {
+                    scroll_position = DATA_LENGTH - VFD_DIGITS;
+                }
+                if (scroll_position > scroll_length) {
+                    scroll_position = scroll_length;
+                    if ((scroll_mode >> 4) & 1) {
+                        scroll_position = 0;
+                    }
+                }
+            } else if ((scroll_mode & 0x0F) == 2) {
+                if (scroll_position > 0) {
+                    scroll_position--;
+                } else if ((scroll_mode >> 4) & 1) {
+                    scroll_position = scroll_length - 1;
+                }
             }
-            curr_display_state = i2c_registers[0];
+            force_update = true;
+        } else if (scroll_interval == 0 || scroll_mode == 0) {
+            scroll_position = 0;
         }
     }
 }

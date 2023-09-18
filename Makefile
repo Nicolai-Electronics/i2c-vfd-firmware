@@ -12,5 +12,6 @@ MINICHLINK := minichlink
 include ch32v003fun/ch32v003fun.mk
 
 flash : cv_flash
+	$(MINICHLINK)/minichlink -D
 clean : cv_clean
 
