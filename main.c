@@ -30,7 +30,28 @@ uint8_t i2c_registers[255] = {0};
 uint8_t curr_i2c_registers[sizeof(i2c_registers)] = {0};
 uint8_t prev_i2c_registers[sizeof(i2c_registers)] = {0};
 
+uint16_t ac_counter = 0;
+bool ac_value = false;
+
+void ac_step() {
+    ac_counter++;
+    if (ac_counter > 10) {
+        ac_counter = 0;
+        if (ac_value) {
+            TIM1->CCER |= TIM_CC2E | TIM_CC2P;
+            TIM1->CCER &= ~(TIM_CC2NE | TIM_CC2NP);
+            ac_value = false;
+        } else {
+            TIM1->CCER |= TIM_CC2NE | TIM_CC2NP;
+            TIM1->CCER &= ~(TIM_CC2E | TIM_CC2P);
+            ac_value = true;
+        }
+    }
+}
+
 void enable_timer() {
+    uint8_t deadtime = 255;
+
     // Enable GPIO port A and timer 1
     RCC->APB2PCENR |= RCC_APB2Periph_GPIOA | RCC_APB2Periph_TIM1;
 
@@ -47,26 +68,32 @@ void enable_timer() {
     RCC->APB2PRSTR &= ~RCC_APB2Periph_TIM1;
 
     // Prescaler
-    TIM1->PSC = 0x000A;
+    TIM1->PSC = 0x0300;
 
     // Configure target and maximum value
     TIM1->ATRLR = 255; // Period
-    TIM1->CH2CVR = 128; // Duty cycle
+    TIM1->CH2CVR = 255 - 50; // Duty cycle
 
     // Reload immediately
     TIM1->SWEVGR |= TIM_UG;
 
     // Enable both outputs of channel 2
-    TIM1->CCER |= TIM_CC2E | TIM_CC2NE | TIM_CC2P | TIM_CC2NP;
+    TIM1->CCER |= TIM_CC2E | TIM_CC2P; //| TIM_CC2NE | TIM_CC2NP;
 
     // CH1 Mode is output, PWM1 (CC1S = 00, OC1M = 110)
     TIM1->CHCTLR1 |= TIM_OC2M_2 | TIM_OC2M_1;
 
     // Enable TIM1 outputs
-    TIM1->BDTR |= TIM_MOE;
+    TIM1->BDTR |= TIM_MOE | (deadtime & 0xFF);
 
     // Enable TIM1
     TIM1->CTLR1 |= TIM_CEN;
+}
+
+
+void TIM1_UP_IRQHandler(void) __attribute__((interrupt));
+void TIM1_UP_IRQHandler() {
+
 }
 
 void disable_timer() {
@@ -249,8 +276,9 @@ int main() {
     uint8_t scroll_length = 0;
     bool force_update = false;
 
-    strcpy(&i2c_registers[DATA_OFFSET], "           1");
-    i2c_registers[0] = 5; // Enable screen and LED
+    strcpy(&i2c_registers[DATA_OFFSET], "          v2");
+    i2c_registers[0] = 1; // Enable screen
+    i2c_registers[6] = 100; // Default brightness
     i2c_changed = true;
 
 
@@ -259,6 +287,8 @@ int main() {
             memcpy(curr_i2c_registers, i2c_registers, sizeof(i2c_registers));
             i2c_changed = false;
         }
+
+        ac_step();
 
         // Register 0, bit 0: display power control
         // Register 0, bit 1: display test mode
@@ -294,7 +324,10 @@ int main() {
         uint16_t* scroll_interval_ptr = (uint16_t*) &curr_i2c_registers[4];
         scroll_interval = (*scroll_interval_ptr) * DELAY_MS_TIME;
 
-        // Registers 6-9: reserved
+        // Register 6: filament current
+        TIM1->CH2CVR = 0xFF - curr_i2c_registers[6];
+
+        // Registers 7-9: reserved
 
         // Registers 10 - 255: data
         bool data_changed = (memcmp(&prev_i2c_registers[DATA_OFFSET], &curr_i2c_registers[DATA_OFFSET], DATA_LENGTH) != 0);
