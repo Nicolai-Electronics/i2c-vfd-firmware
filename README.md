@@ -28,7 +28,7 @@ The default I2C address is 0x10. The address can be changed by bridging the addr
 
 ### System control
 
-To enable the display write `0x01` to register `0x00`. If you also want to turn on the amber LED on the back of the board write `0x03` instead.
+To enable the display write `0x01` to register `0x00`. If you also want to turn on the amber LED on the back of the board write `0x05` (0x04 + 0x01) instead.
 
 The display is enabled by default when power is applied. This register allows disabling the VFD and the voltage boosters on the VFD board for saving power.
 
