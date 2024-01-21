@@ -278,7 +278,7 @@ int main() {
 
     strcpy(&i2c_registers[DATA_OFFSET], "          v2");
     i2c_registers[0] = 1; // Enable screen
-    i2c_registers[6] = 100; // Default brightness
+    i2c_registers[6] = 110; // Default brightness
     i2c_changed = true;
 
 
